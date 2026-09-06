@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ephemera - WebRTC QA Test Harness</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; padding: 24px; margin: 0; }
+    .card { background: #1e293b; border-radius: 8px; padding: 18px; margin-bottom: 16px; border: 1px solid #334155; }
+    h1 { font-size: 1.4rem; color: #38bdf8; margin-top: 0; }
+    h2 { font-size: 1rem; color: #94a3b8; margin-top: 0; }
+    .status-badge { display: inline-block; padding: 4px 10px; border-radius: 9999px; font-weight: bold; font-size: 0.8rem; }
+    .status-connected { background: #065f46; color: #34d399; }
+    .status-disconnected { background: #7f1d1d; color: #f87171; }
+    .status-connecting { background: #78350f; color: #fbbf24; }
+    button { background: #2563eb; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; margin-right: 8px; margin-top: 6px; }
+    button:hover { background: #1d4ed8; }
+    button:disabled { background: #475569; cursor: not-allowed; }
+    pre { background: #020617; border: 1px solid #1e293b; padding: 12px; border-radius: 6px; height: 220px; overflow-y: auto; font-size: 0.85rem; color: #cbd5e1; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    input[type="file"] { margin: 8px 0; color: #94a3b8; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+
+  <h1>🧪 Ephemera WebRTC QA Harness</h1>
+
+  <div class="grid">
+    <div class="card">
+      <h2>Connection Status</h2>
+      <p>WebSocket Signaling: <span id="wsStatus" class="status-badge status-disconnected">Disconnected</span></p>
+      <p>ICE Connection State: <span id="iceStatus" class="status-badge status-disconnected">new</span></p>
+      <p>DataChannel: <span id="dcStatus" class="status-badge status-disconnected">closed</span></p>
+      <button id="btnConnect" onclick="initSignaling()">Connect Signaling</button>
+      <button id="btnOffer" onclick="createOffer()" disabled>Initiate WebRTC Offer</button>
+    </div>
+
+    <div class="card">
+      <h2>P2P Chunk / File Test</h2>
+      <button id="btnSendDummy" onclick="sendDummyChunk()" disabled>Send 512 KB Chunk</button>
+      <br /><br />
+      <input type="file" id="fileInput" disabled onchange="sendFile(this.files[0])" />
+      <p id="transferStats" style="font-size: 0.85rem; color: #94a3b8;"></p>
+    </div>
+  </div>
+
+  <div class="card">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <h2>Execution Logs</h2>
+      <button onclick="clearLogs()" style="padding:4px 8px; font-size:0.75rem; background:#475569;">Clear Logs</button>
+    </div>
+    <pre id="logOutput"></pre>
+  </div>
+
+  <script>
+    const CONFIG = {
+      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+    };
+    const CHUNK_SIZE = 16384; // 16 KB WebRTC safe packet size
+
+    let ws = null;
+    let pc = null;
+    let dataChannel = null;
+
+    const logOutput = document.getElementById('logOutput');
+    function log(msg, type = 'INFO') {
+      const timestamp = new Date().toISOString().split('T')[1].slice(0, 8);
+      logOutput.innerHTML += `[${timestamp}] [${type}] ${msg}\n`;
+      logOutput.scrollTop = logOutput.scrollHeight;
+      console.log(`[${type}]`, msg);
+    }
+
+    function clearLogs() { logOutput.innerHTML = ''; }
+
+    function updateBadge(id, text, stateClass) {
+      const el = document.getElementById(id);
+      if (el) {
+        el.textContent = text;
+        el.className = `status-badge ${stateClass}`;
+      }
+    }
+
+    function initSignaling() {
+      ws = new WebSocket('ws://localhost:8080');
+
+      ws.onopen = () => {
+        updateBadge('wsStatus', 'Connected', 'status-connected');
+        document.getElementById('btnOffer').disabled = false;
+        document.getElementById('btnConnect').disabled = true;
+        log('Connected to Signaling Server', 'SUCCESS');
+        setupPeerConnection();
+      };
+
+      ws.onmessage = async (event) => {
+        const msg = JSON.parse(event.data);
+        
+        if (msg.offer) {
+          log('Received SDP Offer from peer', 'SIGNAL');
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.offer));
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          ws.send(JSON.stringify({ answer }));
+          log('Created and sent SDP Answer', 'SIGNAL');
+        } else if (msg.answer) {
+          log('Received SDP Answer from peer', 'SIGNAL');
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
+        } else if (msg.candidate) {
+          try {
+            await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+          } catch (e) {
+            log('Error adding ICE candidate: ' + e.message, 'ERROR');
+          }
+        }
+      };
+
+      ws.onclose = () => {
+        updateBadge('wsStatus', 'Disconnected', 'status-disconnected');
+        document.getElementById('btnConnect').disabled = false;
+        log('Signaling server connection closed', 'WARN');
+      };
+    }
+
+    function setupPeerConnection() {
+      pc = new RTCPeerConnection(CONFIG);
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ candidate: event.candidate }));
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        const state = pc.iceConnectionState;
+        const badgeClass = (state === 'connected' || state === 'completed') ? 'status-connected' : (state === 'checking' ? 'status-connecting' : 'status-disconnected');
+        updateBadge('iceStatus', state, badgeClass);
+        log(`ICE Connection State: ${state}`, 'WEBRTC');
+      };
+
+      pc.ondatachannel = (event) => {
+        log('Remote DataChannel received from initiator', 'WEBRTC');
+        setDataChannel(event.channel);
+      };
+    }
+
+    async function createOffer() {
+      log('Creating DataChannel (initiator)...', 'WEBRTC');
+      const dc = pc.createDataChannel('ephemera-data', { ordered: true });
+      setDataChannel(dc);
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ws.send(JSON.stringify({ offer }));
+      log('Created and sent SDP Offer', 'SIGNAL');
+    }
+
+    let incomingChunks = [];
+    let expectedTotalBytes = 0;
+    let expectedHash = '';
+
+    function setDataChannel(dc) {
+      dataChannel = dc;
+      dataChannel.binaryType = 'arraybuffer';
+
+      dataChannel.onopen = () => {
+        updateBadge('dcStatus', 'Open', 'status-connected');
+        document.getElementById('btnSendDummy').disabled = false;
+        const fileInput = document.getElementById('fileInput');
+        if (fileInput) fileInput.disabled = false;
+        log('DataChannel is now OPEN and ready for transfer', 'SUCCESS');
+      };
+
+      dataChannel.onclose = () => {
+        updateBadge('dcStatus', 'Closed', 'status-disconnected');
+        document.getElementById('btnSendDummy').disabled = true;
+        const fileInput = document.getElementById('fileInput');
+        if (fileInput) fileInput.disabled = true;
+        log('DataChannel closed', 'WARN');
+      };
+
+      dataChannel.onmessage = async (event) => {
+        const data = event.data;
+
+        // Check for control header
+        if (typeof data === 'string') {
+          try {
+            const meta = JSON.parse(data);
+            if (meta.type === 'START_TRANSFER') {
+              incomingChunks = [];
+              expectedTotalBytes = meta.totalBytes;
+              expectedHash = meta.hash;
+              log(`Incoming stream started: ${meta.totalBytes / 1024} KB`, 'INFO');
+            } else if (meta.type === 'END_TRANSFER') {
+              // Reassemble chunks
+              const completeBlob = new Blob(incomingChunks);
+              const completeBuffer = await completeBlob.arrayBuffer();
+
+              const hashBuffer = await crypto.subtle.digest('SHA-256', completeBuffer);
+              const hashArray = Array.from(new Uint8Array(hashBuffer));
+              const receivedHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+              const isMatch = receivedHash === expectedHash;
+              log(`🎉 Chunk transfer complete! Received: ${(completeBuffer.byteLength / 1024).toFixed(2)} KB | Verified Hash: ${receivedHash.substring(0, 12)}... [Match: ${isMatch}]`, 'SUCCESS');
+            }
+          } catch (e) {
+            log(`Text message: ${data}`, 'DATA');
+          }
+          return;
+        }
+
+        // Binary Slice Received
+        incomingChunks.push(data);
+      };
+    }
+
+    async function streamBuffer(arrayBuffer) {
+      const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+
+      log(`Starting P2P Stream: ${(arrayBuffer.byteLength / 1024).toFixed(2)} KB | SHA-256: ${hashHex.substring(0, 12)}...`, 'DATA');
+
+      // 1. Send Header
+      dataChannel.send(JSON.stringify({
+        type: 'START_TRANSFER',
+        totalBytes: arrayBuffer.byteLength,
+        hash: hashHex
+      }));
+
+      // 2. Stream Slices
+      let offset = 0;
+      while (offset < arrayBuffer.byteLength) {
+        const slice = arrayBuffer.slice(offset, offset + CHUNK_SIZE);
+        dataChannel.send(slice);
+        offset += CHUNK_SIZE;
+      }
+
+      // 3. Send Completion
+      dataChannel.send(JSON.stringify({ type: 'END_TRANSFER' }));
+      log(`Finished sending all slices.`, 'SUCCESS');
+    }
+
+    async function sendDummyChunk() {
+      if (!dataChannel || dataChannel.readyState !== 'open') return;
+
+      const size = 512 * 1024; // 512 KB
+      const dummy = new Uint8Array(size);
+      for (let i = 0; i < size; i += 65536) {
+        crypto.getRandomValues(dummy.subarray(i, Math.min(i + 65536, size)));
+      }
+      await streamBuffer(dummy.buffer);
+    }
+
+    function sendFile(file) {
+      if (!file || !dataChannel || dataChannel.readyState !== 'open') return;
+      const reader = new FileReader();
+      reader.onload = async (e) => {
+        await streamBuffer(e.target.result);
+      };
+      reader.readAsArrayBuffer(file);
+    }
+  </script>
+</body>
+</html>
