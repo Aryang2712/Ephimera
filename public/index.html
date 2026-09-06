@@ -2,26 +2,49 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Ephemera Demo Node</title>
+  <title>Ephemera — P2P CDN Demo</title>
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <style>
-    body { font-family: sans-serif; padding: 20px; max-width: 600px; margin: auto; }
-    button { padding: 8px 16px; margin: 4px; cursor: pointer; }
-    #logs { background: #1e1e1e; color: #00ff66; padding: 12px; height: 220px; overflow-y: auto; font-family: monospace; border-radius: 4px; }
-    .status { font-weight: bold; margin: 10px 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 24px; max-width: 800px; margin: auto; background: #0f172a; color: #f8fafc; }
+    h1 { margin-bottom: 4px; }
+    .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; background: #334155; }
+    .card { background: #1e293b; border-radius: 8px; padding: 16px; margin: 16px 0; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); }
+    button, input[type="file"] { background: #2563eb; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    video { width: 100%; max-height: 360px; background: black; border-radius: 6px; margin-top: 10px; }
+    #logs { background: #020617; color: #38bdf8; padding: 12px; height: 180px; overflow-y: auto; font-family: monospace; font-size: 13px; border-radius: 6px; border: 1px solid #1e293b; }
+    .progress-bar { width: 100%; height: 10px; background: #334155; border-radius: 5px; overflow: hidden; margin-top: 8px; }
+    .progress-fill { height: 100%; width: 0%; background: #22c55e; transition: width 0.1s; }
   </style>
 </head>
 <body>
-  <h2>Ephemera P2P Swarm Node</h2>
-  <div class="status" id="status">Status: Disconnected</div>
-  
-  <button id="btnJoin">1. Join Swarm (Room: demo-room)</button>
-  <button id="btnSend" disabled>2. Broadcast Test Chunk</button>
-  
-  <h3>Live Node Logs</h3>
-  <pre id="logs"></pre>
+
+  <h1>Ephemera <span class="badge" id="statusBadge">Offline</span></h1>
+  <p style="color: #94a3b8;">Serverless Peer-to-Peer CDN Demonstration Node</p>
+
+  <button id="btnInit">1. Connect Node to Swarm</button>
+
+  <div class="card" id="seederBox" style="display:none;">
+    <h3>Seeder Mode (Source)</h3>
+    <p style="color:#94a3b8; font-size:14px;">Select an MP4 file to seed to connected peers:</p>
+    <input type="file" id="fileInput" accept="video/mp4" />
+    <button id="btnBroadcast" disabled>Stream to Peers</button>
+  </div>
+
+  <div class="card" id="leecherBox" style="display:none;">
+    <h3>Playback Node</h3>
+    <video id="videoPlayer" controls autoplay muted></video>
+    <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+    <p id="chunkStats" style="font-size: 13px; color: #94a3b8; margin-top: 6px;">Awaiting video stream...</p>
+  </div>
+
+  <div class="card">
+    <h3>Network Logs</h3>
+    <pre id="logs"></pre>
+  </div>
 
   <script>
+    const CHUNK_SIZE = 32 * 1024; // 32KB safe WebRTC chunk size
     const logBox = document.getElementById('logs');
     const log = (msg) => {
       logBox.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
@@ -30,12 +53,40 @@
 
     let peer = null;
     let connections = [];
+    let selectedFile = null;
 
-    document.getElementById('btnJoin').onclick = () => {
-      document.getElementById('btnJoin').disabled = true;
-      log('Initializing local WebRTC peer...');
+    // MediaSource setup for incremental video stitching
+    const mediaSource = new MediaSource();
+    const video = document.getElementById('videoPlayer');
+    let sourceBuffer = null;
+    let chunkQueue = [];
+    let isAppending = false;
 
-      // Connect to local signaling server
+    video.src = URL.createObjectURL(mediaSource);
+    mediaSource.addEventListener('sourceopen', () => {
+      try {
+        // Standard baseline H.264 profile for MP4
+        sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.42E01E, mp4a.40.2"');
+        sourceBuffer.addEventListener('updateend', processBufferQueue);
+      } catch (e) {
+        log('MediaSource error (codec fallback): ' + e.message);
+      }
+    });
+
+    function processBufferQueue() {
+      if (chunkQueue.length > 0 && !sourceBuffer.updating) {
+        isAppending = true;
+        sourceBuffer.appendBuffer(chunkQueue.shift());
+      } else {
+        isAppending = false;
+      }
+    }
+
+    // Step 1: Swarm Initialization
+    document.getElementById('btnInit').onclick = () => {
+      document.getElementById('btnInit').disabled = true;
+      log('Bootstrapping WebRTC node...');
+
       peer = new Peer({
         host: 'localhost',
         port: 3000,
@@ -44,60 +95,110 @@
       });
 
       peer.on('open', async (id) => {
-        document.getElementById('status').innerText = `Status: Connected (Node ID: ${id})`;
-        log(`Registered with signaling server. Peer ID: ${id}`);
+        document.getElementById('statusBadge').innerText = `Online: ${id.substring(0, 8)}...`;
+        document.getElementById('statusBadge').style.background = '#16a34a';
+        document.getElementById('seederBox').style.display = 'block';
+        document.getElementById('leecherBox').style.display = 'block';
+        log(`Registered with signaling. Peer ID: ${id}`);
 
-        // Register with backend room discovery
-        try {
-          const res = await fetch('http://localhost:3000/api/rooms/demo-room/join', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ peerId: id })
-          });
-          const data = await res.json();
-          log(`Found ${data.activePeers.length} other active peer(s) in swarm.`);
-
-          // Connect to each peer currently in the room
-          data.activePeers.forEach(remotePeerId => {
-            log(`Dialing peer: ${remotePeerId}...`);
-            const conn = peer.connect(remotePeerId);
-            wireConnection(conn);
-          });
-
-          document.getElementById('btnSend').disabled = false;
-        } catch (err) {
-          log('Failed to join room: ' + err.message);
-        }
+        const res = await fetch('http://localhost:3000/api/rooms/demo-room/join', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ peerId: id })
+        });
+        const data = await res.json();
+        
+        data.activePeers.forEach(remoteId => {
+          log(`Discovered active peer: ${remoteId}. Dialing...`);
+          const conn = peer.connect(remoteId);
+          setupConnection(conn);
+        });
       });
 
-      // Handle inbound connections from new peers joining later
       peer.on('connection', (conn) => {
-        log(`Inbound connection from: ${conn.peer}`);
-        wireConnection(conn);
-        document.getElementById('btnSend').disabled = false;
+        log(`Incoming P2P link from: ${conn.peer}`);
+        setupConnection(conn);
       });
     };
 
-    function wireConnection(conn) {
+    function setupConnection(conn) {
       conn.on('open', () => {
-        log(`P2P DataChannel OPEN with ${conn.peer}!`);
+        log(`DataChannel READY with ${conn.peer}`);
         connections.push(conn);
+        if (selectedFile) document.getElementById('btnBroadcast').disabled = false;
       });
 
       conn.on('data', (data) => {
-        log(`<<< RECEIVED from ${conn.peer}: "${data}"`);
+        if (data.type === 'HEADER') {
+          log(`Incoming video: ${data.name} (${(data.size / 1024 / 1024).toFixed(2)} MB, ${data.totalChunks} chunks)`);
+          window.expectedChunks = data.totalChunks;
+          window.receivedChunks = 0;
+        } else if (data.type === 'CHUNK') {
+          window.receivedChunks++;
+          const rawBuffer = new Uint8Array(data.chunk);
+
+          // Update UI stats
+          const pct = Math.round((window.receivedChunks / window.expectedChunks) * 100);
+          document.getElementById('progressFill').style.width = pct + '%';
+          document.getElementById('chunkStats').innerText = `Received chunk ${window.receivedChunks}/${window.expectedChunks} (${pct}%) via WebRTC`;
+
+          // Feed into MediaSource playback queue
+          chunkQueue.push(rawBuffer);
+          if (!isAppending) processBufferQueue();
+        }
       });
 
       conn.on('close', () => {
-        log(`Peer ${conn.peer} disconnected.`);
         connections = connections.filter(c => c !== conn);
       });
     }
 
-    document.getElementById('btnSend').onclick = () => {
-      const msg = `Payload chunk at ${Date.now()}`;
-      connections.forEach(conn => conn.send(msg));
-      log(`>>> SENT to ${connections.length} peer(s): "${msg}"`);
+    // Seeder File Input
+    document.getElementById('fileInput').onchange = (e) => {
+      selectedFile = e.target.files[0];
+      if (selectedFile && connections.length > 0) {
+        document.getElementById('btnBroadcast').disabled = false;
+      }
+    };
+
+    // Step 2: Slice & Stream Video Over DataChannel
+    document.getElementById('btnBroadcast').onclick = async () => {
+      if (!selectedFile) return;
+      document.getElementById('btnBroadcast').disabled = true;
+
+      const totalChunks = Math.ceil(selectedFile.size / CHUNK_SIZE);
+      log(`Seeding "${selectedFile.name}" across ${totalChunks} chunks...`);
+
+      // Broadcast Manifest Header
+      connections.forEach(c => c.send({
+        type: 'HEADER',
+        name: selectedFile.name,
+        size: selectedFile.size,
+        totalChunks: totalChunks
+      }));
+
+      // Read and push chunks
+      let offset = 0;
+      let chunkIndex = 0;
+
+      while (offset < selectedFile.size) {
+        const slice = selectedFile.slice(offset, offset + CHUNK_SIZE);
+        const arrayBuffer = await slice.arrayBuffer();
+
+        connections.forEach(c => c.send({
+          type: 'CHUNK',
+          index: chunkIndex,
+          chunk: arrayBuffer
+        }));
+
+        offset += CHUNK_SIZE;
+        chunkIndex++;
+
+        // Brief delay (5ms) to avoid saturating browser socket buffer
+        await new Promise(r => setTimeout(r, 5));
+      }
+
+      log('All chunks seeded to the swarm successfully!');
     };
   </script>
 </body>
