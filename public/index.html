@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Ephemera — Serverless P2P Swarm & Live CDN</title>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --card: #151d30;
+      --border: #24304f;
+      --accent: #38bdf8;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 20px;
+      max-width: 950px;
+      margin: auto;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 20px;
+    }
+    .badge {
+      padding: 4px 10px;
+      border-radius: 9999px;
+      font-size: 12px;
+      font-weight: 700;
+      background: var(--border);
+    }
+    .badge.online { background: #064e3b; color: #34d399; }
+    
+    /* Live Stats Row */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .stat-card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      padding: 12px 16px;
+      border-radius: 8px;
+    }
+    .stat-card span { font-size: 12px; color: var(--muted); text-transform: uppercase; font-weight: 600; }
+    .stat-card div { font-size: 20px; font-weight: bold; margin-top: 4px; color: var(--accent); }
+
+    /* Card Panels */
+    .panel {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+    }
+    .panel-title { font-size: 15px; font-weight: 600; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
+    
+    button, input[type="file"] {
+      background: #2563eb;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      font-size: 13px;
+    }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.alt { background: #334155; }
+    button.alt:hover { background: #475569; }
+
+    /* Video Frames */
+    .video-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    video {
+      width: 100%;
+      height: 200px;
+      background: #020617;
+      border-radius: 6px;
+      object-fit: contain;
+      border: 1px solid var(--border);
+    }
+
+    /* BitTorrent Chunk Mosaic Grid */
+    .chunk-grid {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 3px;
+      background: #0a0f1d;
+      padding: 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      max-height: 120px;
+      overflow-y: auto;
+    }
+    .chunk-block {
+      width: 10px;
+      height: 10px;
+      background: #1e293b;
+      border-radius: 2px;
+      transition: background-color 0.15s;
+    }
+    .chunk-block.fetching { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
+    .chunk-block.done { background: var(--success); }
+
+    /* Terminal Logs */
+    #logs {
+      background: #020617;
+      color: #38bdf8;
+      padding: 12px;
+      height: 140px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div>
+      <h2 style="margin:0;">Ephemera <span id="statusBadge" class="badge">Offline</span></h2>
+      <p style="margin:4px 0 0; color:var(--muted); font-size:13px;">Serverless P2P Swarm & Live Edge Streaming</p>
+    </div>
+    <button id="btnInit">Connect Node to Swarm</button>
+  </header>
+
+  <!-- Metrics Counter -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <span>Connected Peers</span>
+      <div id="metricPeers">0</div>
+    </div>
+    <div class="stat-card">
+      <span>P2P Transfer Speed</span>
+      <div id="metricSpeed">0.0 MB/s</div>
+    </div>
+    <div class="stat-card">
+      <span>Data Offloaded</span>
+      <div id="metricTransferred">0.00 MB</div>
+    </div>
+    <div class="stat-card">
+      <span>Origin Cost Saved</span>
+      <div id="metricSavings" style="color:var(--success);">$0.000</div>
+    </div>
+  </div>
+
+  <!-- Live Webcam P2P Section -->
+  <div class="panel">
+    <div class="panel-title">
+      <span>Live Camera P2P Broadcast (WebRTC MediaStream)</span>
+      <div>
+        <button id="btnStartCam" disabled class="alt">Enable Local Cam</button>
+        <button id="btnBroadcastCam" disabled>Broadcast Live to Peers</button>
+      </div>
+    </div>
+    <div class="video-grid">
+      <div>
+        <span style="font-size:12px; color:var(--muted)">Local Camera Input</span>
+        <video id="localCam" autoplay muted playsinline></video>
+      </div>
+      <div>
+        <span style="font-size:12px; color:var(--muted)">Peer Live Feed (Zero-Server Relay)</span>
+        <video id="remoteCam" autoplay playsinline controls></video>
+      </div>
+    </div>
+  </div>
+
+  <!-- VOD Chunking & Mesh Re-seeding -->
+  <div class="panel">
+    <div class="panel-title">
+      <span>Static Asset P2P Swarm (VOD / File Transfer)</span>
+      <span id="roleBadge" class="badge" style="background:#1e293b; color:var(--muted)">Role: Idle</span>
+    </div>
+
+    <div style="display:flex; gap:10px; align-items:center; margin-bottom:12px;">
+      <input type="file" id="fileInput" accept="video/mp4" disabled />
+      <button id="btnSeed" disabled>Seed Video File</button>
+    </div>
+
+    <div style="margin-bottom: 12px;">
+      <div style="display:flex; justify-content:space-between; font-size:12px; margin-bottom:4px;">
+        <span style="color:var(--muted)">BitTorrent Swarm Assembly Mosaic</span>
+        <span id="chunkPercent" style="color:var(--success)">0%</span>
+      </div>
+      <div id="chunkGrid" class="chunk-grid"></div>
+    </div>
+
+    <div>
+      <span style="font-size:12px; color:var(--muted)">Reconstructed Stream Playback</span>
+      <video id="vodPlayer" controls playsinline style="height:220px;"></video>
+    </div>
+  </div>
+
+  <!-- Realtime Network Logs -->
+  <div class="panel">
+    <div class="panel-title">Network Activity Logs</div>
+    <pre id="logs"></pre>
+  </div>
+
+  <script>
+    const CHUNK_SIZE = 32 * 1024; // 32KB
+    const AWS_EGRESS_PER_GB = 0.09; // Standard CloudFront egress cost ($0.09/GB)
+    const logBox = document.getElementById('logs');
+    const log = (msg) => {
+      logBox.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+      logBox.scrollTop = logBox.scrollHeight;
+    };
+
+    let peer = null;
+    let myPeerId = null;
+    let connections = [];
+    let localStream = null;
+
+    // Metrics State
+    let totalBytesTransferred = 0;
+    let speedSamples = [];
+
+    // VOD & Mesh State
+    let fileBuffer = null;
+    let selectedFile = null;
+    let receivedChunks = [];
+    let totalChunks = 0;
+    let assetMetadata = null;
+
+    // ----------------------------------------------------
+    // Metric Calculation Helpers
+    // ----------------------------------------------------
+    function recordTransfer(bytes) {
+      totalBytesTransferred += bytes;
+      const mb = totalBytesTransferred / (1024 * 1024);
+      document.getElementById('metricTransferred').innerText = `${mb.toFixed(2)} MB`;
+
+      // Cost savings ($0.09 per GB)
+      const gb = totalBytesTransferred / (1024 * 1024 * 1024);
+      const savings = gb * AWS_EGRESS_PER_GB;
+      document.getElementById('metricSavings').innerText = `$${savings.toFixed(4)}`;
+
+      // Transfer Speed Calculation
+      speedSamples.push({ t: Date.now(), bytes: bytes });
+      const now = Date.now();
+      speedSamples = speedSamples.filter(s => now - s.t < 1000);
+      const currentBytesPerSec = speedSamples.reduce((acc, s) => acc + s.bytes, 0);
+      const mbps = (currentBytesPerSec / (1024 * 1024)).toFixed(1);
+      document.getElementById('metricSpeed').innerText = `${mbps} MB/s`;
+    }
+
+    // ----------------------------------------------------
+    // Step 1: Connect to Swarm
+    // ----------------------------------------------------
+    document.getElementById('btnInit').onclick = () => {
+      document.getElementById('btnInit').disabled = true;
+      log('Bootstrapping WebRTC peer node...');
+
+      peer = new Peer({
+        host: 'localhost',
+        port: 3000,
+        path: '/peerjs',
+        config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
+      });
+
+      peer.on('open', async (id) => {
+        myPeerId = id;
+        document.getElementById('statusBadge').innerText = `Online: ${id.substring(0, 7)}`;
+        document.getElementById('statusBadge').className = 'badge online';
+        document.getElementById('btnStartCam').disabled = false;
+        document.getElementById('fileInput').disabled = false;
+        log(`Signaling linked. ID: ${id}`);
+
+        // Swarm discovery
+        try {
+          const res = await fetch('http://localhost:3000/api/rooms/demo-room/join', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ peerId: id })
+          });
+          const data = await res.json();
+          data.activePeers.forEach(peerId => dialPeer(peerId));
+        } catch (e) {
+          log('Signaling join note: ' + e.message);
+        }
+      });
+
+      // Handle inbound DataChannel connections
+      peer.on('connection', (conn) => {
+        setupDataConnection(conn);
+      });
+
+      // Handle inbound Live MediaStreams (Webcam)
+      peer.on('call', (call) => {
+        log(`Incoming Live Camera Call from: ${call.peer}`);
+        call.answer(); // Answer without sending return video (viewer mode)
+        call.on('stream', (stream) => {
+          document.getElementById('remoteCam').srcObject = stream;
+          log('Attached peer live stream to player.');
+        });
+      });
+    };
+
+    function dialPeer(remoteId) {
+      log(`Dialing peer: ${remoteId}`);
+      const conn = peer.connect(remoteId);
+      setupDataConnection(conn);
+    }
+
+    function setupDataConnection(conn) {
+      conn.on('open', () => {
+        log(`DataChannel OPEN with: ${conn.peer}`);
+        connections.push(conn);
+        document.getElementById('metricPeers').innerText = connections.length;
+        if (selectedFile) document.getElementById('btnSeed').disabled = false;
+
+        // If this node already has the completed asset, announce to new peer immediately
+        if (fileBuffer && assetMetadata) {
+          conn.send({ type: 'HAVE', metadata: assetMetadata });
+        }
+      });
+
+      conn.on('data', (data) => {
+        handleIncomingData(data, conn);
+      });
+
+      conn.on('close', () => {
+        connections = connections.filter(c => c !== conn);
+        document.getElementById('metricPeers').innerText = connections.length;
+      });
+    }
+
+    // ----------------------------------------------------
+    // Step 2: Live Camera P2P Broadcasting
+    // ----------------------------------------------------
+    document.getElementById('btnStartCam').onclick = async () => {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        document.getElementById('localCam').srcObject = localStream;
+        document.getElementById('btnBroadcastCam').disabled = false;
+        log('Webcam feed acquired locally.');
+      } catch (err) {
+        log('Camera access denied: ' + err.message);
+      }
+    };
+
+    document.getElementById('btnBroadcastCam').onclick = () => {
+      if (!localStream) return;
+      connections.forEach(c => {
+        log(`Calling peer ${c.peer} with Live Video Track...`);
+        peer.call(c.peer, localStream);
+      });
+    };
+
+    // ----------------------------------------------------
+    // Step 3: BitTorrent Chunk Grid & Mesh Re-Seeding
+    // ----------------------------------------------------
+    document.getElementById('fileInput').onchange = (e) => {
+      selectedFile = e.target.files[0];
+      if (selectedFile) {
+        document.getElementById('btnSeed').disabled = false;
+      }
+    };
+
+    document.getElementById('btnSeed').onclick = async () => {
+      if (!selectedFile) return;
+      document.getElementById('btnSeed').disabled = true;
+      document.getElementById('roleBadge').innerText = 'Role: Initial Seeder';
+      document.getElementById('roleBadge').style.color = '#38bdf8';
+
+      totalChunks = Math.ceil(selectedFile.size / CHUNK_SIZE);
+      renderGrid(totalChunks);
+
+      // Read file to ArrayBuffer in memory
+      fileBuffer = await selectedFile.arrayBuffer();
+      assetMetadata = {
+        name: selectedFile.name,
+        size: selectedFile.size,
+        mimeType: selectedFile.type,
+        totalChunks: totalChunks
+      };
+
+      // Mark all chunks on seeder as completed
+      for (let i = 0; i < totalChunks; i++) markBlock(i, 'done');
+      document.getElementById('chunkPercent').innerText = '100% (Seeding)';
+
+      // Announce availability to all connected peers
+      connections.forEach(c => {
+        c.send({ type: 'HAVE', metadata: assetMetadata });
+      });
+
+      log(`Seeding "${selectedFile.name}" across ${totalChunks} discrete chunks.`);
+    };
+
+    function renderGrid(count) {
+      const grid = document.getElementById('chunkGrid');
+      grid.innerHTML = '';
+      for (let i = 0; i < count; i++) {
+        const block = document.createElement('div');
+        block.className = 'chunk-block';
+        block.id = `chunk-${i}`;
+        grid.appendChild(block);
+      }
+    }
+
+    function markBlock(idx, state) {
+      const block = document.getElementById(`chunk-${idx}`);
+      if (block) {
+        block.className = `chunk-block ${state}`;
+      }
+    }
+
+    // Swarm Protocol Message Handler
+    function handleIncomingData(data, conn) {
+      // Message 1: A peer announces they have an asset
+      if (data.type === 'HAVE') {
+        assetMetadata = data.metadata;
+        totalChunks = data.metadata.totalChunks;
+        receivedChunks = new Array(totalChunks);
+        renderGrid(totalChunks);
+        document.getElementById('roleBadge').innerText = 'Role: Leecher (Downloading)';
+        document.getElementById('roleBadge').style.color = '#f59e0b';
+        log(`Swarm discovery: Peer holds "${assetMetadata.name}" (${totalChunks} chunks). Requesting chunks...`);
+
+        // Request all chunks sequentially from available peer
+        for (let i = 0; i < totalChunks; i++) {
+          markBlock(i, 'fetching');
+          conn.send({ type: 'REQUEST_CHUNK', index: i });
+        }
+      }
+
+      // Message 2: A peer requests a chunk that we hold (Seeding / Re-seeding)
+      else if (data.type === 'REQUEST_CHUNK') {
+        if (!fileBuffer) return;
+        const start = data.index * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, fileBuffer.byteLength);
+        const slice = fileBuffer.slice(start, end);
+
+        conn.send({
+          type: 'CHUNK_PAYLOAD',
+          index: data.index,
+          chunk: slice
+        });
+        recordTransfer(slice.byteLength);
+      }
+
+      // Message 3: A chunk payload is received
+      else if (data.type === 'CHUNK_PAYLOAD') {
+        receivedChunks[data.index] = data.chunk;
+        markBlock(data.index, 'done');
+        recordTransfer(data.chunk.byteLength);
+
+        const count = receivedChunks.filter(Boolean).length;
+        const pct = Math.round((count / totalChunks) * 100);
+        document.getElementById('chunkPercent').innerText = `${pct}%`;
+
+        // If download complete: Reconstruct, play, and TURN INTO A SEEDER
+        if (count === totalChunks) {
+          log('All chunks verified! Mounting video stream...');
+          const videoBlob = new Blob(receivedChunks, { type: assetMetadata.mimeType || 'video/mp4' });
+          const videoUrl = URL.createObjectURL(videoBlob);
+          const player = document.getElementById('vodPlayer');
+          player.src = videoUrl;
+          player.play().catch(() => log('Autoplay ready (press play).'));
+
+          // Transform into a Seeder (Mesh Re-Seeding)
+          videoBlob.arrayBuffer().then(buf => {
+            fileBuffer = buf;
+            document.getElementById('roleBadge').innerText = 'Role: Mesh Seeder (Relaying)';
+            document.getElementById('roleBadge').style.color = '#10b981';
+            log('Node promoted to Seeder! Ready to relay chunks to downstream peers.');
+          });
+        }
+      }
+    }
+  </script>
+</body>
+</html>
