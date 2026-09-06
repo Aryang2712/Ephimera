@@ -3,18 +3,78 @@
 <head>
   <meta charset="UTF-8">
   <title>Ephemera — P2P CDN Demo</title>
+  <!-- PeerJS Client Library -->
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 24px; max-width: 800px; margin: auto; background: #0f172a; color: #f8fafc; }
+    body { 
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
+      padding: 24px; 
+      max-width: 800px; 
+      margin: auto; 
+      background: #0f172a; 
+      color: #f8fafc; 
+    }
     h1 { margin-bottom: 4px; }
-    .badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; background: #334155; }
-    .card { background: #1e293b; border-radius: 8px; padding: 16px; margin: 16px 0; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); }
-    button, input[type="file"] { background: #2563eb; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 14px; }
-    button:disabled { opacity: 0.5; cursor: not-allowed; }
-    video { width: 100%; max-height: 360px; background: black; border-radius: 6px; margin-top: 10px; }
-    #logs { background: #020617; color: #38bdf8; padding: 12px; height: 180px; overflow-y: auto; font-family: monospace; font-size: 13px; border-radius: 6px; border: 1px solid #1e293b; }
-    .progress-bar { width: 100%; height: 10px; background: #334155; border-radius: 5px; overflow: hidden; margin-top: 8px; }
-    .progress-fill { height: 100%; width: 0%; background: #22c55e; transition: width 0.1s; }
+    .badge { 
+      display: inline-block; 
+      padding: 4px 8px; 
+      border-radius: 4px; 
+      font-size: 12px; 
+      font-weight: bold; 
+      background: #334155; 
+    }
+    .card { 
+      background: #1e293b; 
+      border-radius: 8px; 
+      padding: 16px; 
+      margin: 16px 0; 
+      box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); 
+    }
+    button, input[type="file"] { 
+      background: #2563eb; 
+      color: white; 
+      border: none; 
+      padding: 8px 16px; 
+      border-radius: 6px; 
+      cursor: pointer; 
+      font-size: 14px; 
+    }
+    button:disabled { 
+      opacity: 0.5; 
+      cursor: not-allowed; 
+    }
+    video { 
+      width: 100%; 
+      max-height: 360px; 
+      background: black; 
+      border-radius: 6px; 
+      margin-top: 10px; 
+    }
+    #logs { 
+      background: #020617; 
+      color: #38bdf8; 
+      padding: 12px; 
+      height: 180px; 
+      overflow-y: auto; 
+      font-family: monospace; 
+      font-size: 13px; 
+      border-radius: 6px; 
+      border: 1px solid #1e293b; 
+    }
+    .progress-bar { 
+      width: 100%; 
+      height: 10px; 
+      background: #334155; 
+      border-radius: 5px; 
+      overflow: hidden; 
+      margin-top: 8px; 
+    }
+    .progress-fill { 
+      height: 100%; 
+      width: 0%; 
+      background: #22c55e; 
+      transition: width 0.1s; 
+    }
   </style>
 </head>
 <body>
@@ -33,7 +93,7 @@
 
   <div class="card" id="leecherBox" style="display:none;">
     <h3>Playback Node</h3>
-    <video id="videoPlayer" controls autoplay muted></video>
+    <video id="videoPlayer" controls playsinline></video>
     <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
     <p id="chunkStats" style="font-size: 13px; color: #94a3b8; margin-top: 6px;">Awaiting video stream...</p>
   </div>
@@ -55,34 +115,14 @@
     let connections = [];
     let selectedFile = null;
 
-    // MediaSource setup for incremental video stitching
-    const mediaSource = new MediaSource();
+    // In-memory buffer to hold incoming chunks
+    let receivedChunks = [];
+    let totalChunksExpected = 0;
+    let receivedMimeType = 'video/mp4';
+
     const video = document.getElementById('videoPlayer');
-    let sourceBuffer = null;
-    let chunkQueue = [];
-    let isAppending = false;
 
-    video.src = URL.createObjectURL(mediaSource);
-    mediaSource.addEventListener('sourceopen', () => {
-      try {
-        // Standard baseline H.264 profile for MP4
-        sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.42E01E, mp4a.40.2"');
-        sourceBuffer.addEventListener('updateend', processBufferQueue);
-      } catch (e) {
-        log('MediaSource error (codec fallback): ' + e.message);
-      }
-    });
-
-    function processBufferQueue() {
-      if (chunkQueue.length > 0 && !sourceBuffer.updating) {
-        isAppending = true;
-        sourceBuffer.appendBuffer(chunkQueue.shift());
-      } else {
-        isAppending = false;
-      }
-    }
-
-    // Step 1: Swarm Initialization
+    // Step 1: Connect to Swarm
     document.getElementById('btnInit').onclick = () => {
       document.getElementById('btnInit').disabled = true;
       log('Bootstrapping WebRTC node...');
@@ -101,18 +141,22 @@
         document.getElementById('leecherBox').style.display = 'block';
         log(`Registered with signaling. Peer ID: ${id}`);
 
-        const res = await fetch('http://localhost:3000/api/rooms/demo-room/join', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ peerId: id })
-        });
-        const data = await res.json();
-        
-        data.activePeers.forEach(remoteId => {
-          log(`Discovered active peer: ${remoteId}. Dialing...`);
-          const conn = peer.connect(remoteId);
-          setupConnection(conn);
-        });
+        try {
+          const res = await fetch('http://localhost:3000/api/rooms/demo-room/join', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ peerId: id })
+          });
+          const data = await res.json();
+          
+          data.activePeers.forEach(remoteId => {
+            log(`Discovered active peer: ${remoteId}. Dialing...`);
+            const conn = peer.connect(remoteId);
+            setupConnection(conn);
+          });
+        } catch (err) {
+          log('Signaling join error: ' + err.message);
+        }
       });
 
       peer.on('connection', (conn) => {
@@ -131,20 +175,31 @@
       conn.on('data', (data) => {
         if (data.type === 'HEADER') {
           log(`Incoming video: ${data.name} (${(data.size / 1024 / 1024).toFixed(2)} MB, ${data.totalChunks} chunks)`);
-          window.expectedChunks = data.totalChunks;
-          window.receivedChunks = 0;
+          totalChunksExpected = data.totalChunks;
+          receivedChunks = new Array(totalChunksExpected);
+          receivedMimeType = data.mimeType || 'video/mp4';
+          document.getElementById('progressFill').style.width = '0%';
         } else if (data.type === 'CHUNK') {
-          window.receivedChunks++;
-          const rawBuffer = new Uint8Array(data.chunk);
+          // Store chunk at the exact index
+          receivedChunks[data.index] = data.chunk;
 
-          // Update UI stats
-          const pct = Math.round((window.receivedChunks / window.expectedChunks) * 100);
+          const count = receivedChunks.filter(Boolean).length;
+          const pct = Math.round((count / totalChunksExpected) * 100);
+
           document.getElementById('progressFill').style.width = pct + '%';
-          document.getElementById('chunkStats').innerText = `Received chunk ${window.receivedChunks}/${window.expectedChunks} (${pct}%) via WebRTC`;
+          document.getElementById('chunkStats').innerText = `Received chunk ${count}/${totalChunksExpected} (${pct}%) via WebRTC`;
 
-          // Feed into MediaSource playback queue
-          chunkQueue.push(rawBuffer);
-          if (!isAppending) processBufferQueue();
+          // When all chunks arrive, build a complete Blob and play
+          if (count === totalChunksExpected) {
+            log('All chunks received! Constructing media Blob and mounting video...');
+            const videoBlob = new Blob(receivedChunks, { type: receivedMimeType });
+            const videoUrl = URL.createObjectURL(videoBlob);
+            video.src = videoUrl;
+            video.load();
+            video.play().catch(e => {
+              log('Autoplay deferred: press play on the video player directly.');
+            });
+          }
         }
       });
 
@@ -169,15 +224,15 @@
       const totalChunks = Math.ceil(selectedFile.size / CHUNK_SIZE);
       log(`Seeding "${selectedFile.name}" across ${totalChunks} chunks...`);
 
-      // Broadcast Manifest Header
+      // Broadcast Header
       connections.forEach(c => c.send({
         type: 'HEADER',
         name: selectedFile.name,
         size: selectedFile.size,
+        mimeType: selectedFile.type,
         totalChunks: totalChunks
       }));
 
-      // Read and push chunks
       let offset = 0;
       let chunkIndex = 0;
 
@@ -194,11 +249,11 @@
         offset += CHUNK_SIZE;
         chunkIndex++;
 
-        // Brief delay (5ms) to avoid saturating browser socket buffer
-        await new Promise(r => setTimeout(r, 5));
+        // 3ms delay to keep the WebRTC message buffer smooth
+        await new Promise(r => setTimeout(r, 3));
       }
 
-      log('All chunks seeded to the swarm successfully!');
+      log('All chunks seeded to peers successfully!');
     };
   </script>
 </body>
