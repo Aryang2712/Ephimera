@@ -1,0 +1,30 @@
+{
+  "name": "ephimera",
+  "version": "1.0.0",
+  "description": "**EPHIMERA** is a serverless, peer-to-peer (P2P) Content Delivery Network (CDN) designed to drastically reduce origin server load and bandwidth costs by utilizing browser-to-browser data streaming.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Aryang2712/Ephimera.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Aryang2712/Ephimera/issues"
+  },
+  "homepage": "https://github.com/Aryang2712/Ephimera#readme",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^13.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "peer": "^1.0.2"
+  }
+}

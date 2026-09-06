@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Ephemera Demo Node</title>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <style>
+    body { font-family: sans-serif; padding: 20px; max-width: 600px; margin: auto; }
+    button { padding: 8px 16px; margin: 4px; cursor: pointer; }
+    #logs { background: #1e1e1e; color: #00ff66; padding: 12px; height: 220px; overflow-y: auto; font-family: monospace; border-radius: 4px; }
+    .status { font-weight: bold; margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <h2>Ephemera P2P Swarm Node</h2>
+  <div class="status" id="status">Status: Disconnected</div>
+  
+  <button id="btnJoin">1. Join Swarm (Room: demo-room)</button>
+  <button id="btnSend" disabled>2. Broadcast Test Chunk</button>
+  
+  <h3>Live Node Logs</h3>
+  <pre id="logs"></pre>
+
+  <script>
+    const logBox = document.getElementById('logs');
+    const log = (msg) => {
+      logBox.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+      logBox.scrollTop = logBox.scrollHeight;
+    };
+
+    let peer = null;
+    let connections = [];
+
+    document.getElementById('btnJoin').onclick = () => {
+      document.getElementById('btnJoin').disabled = true;
+      log('Initializing local WebRTC peer...');
+
+      // Connect to local signaling server
+      peer = new Peer({
+        host: 'localhost',
+        port: 3000,
+        path: '/peerjs',
+        config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }
+      });
+
+      peer.on('open', async (id) => {
+        document.getElementById('status').innerText = `Status: Connected (Node ID: ${id})`;
+        log(`Registered with signaling server. Peer ID: ${id}`);
+
+        // Register with backend room discovery
+        try {
+          const res = await fetch('http://localhost:3000/api/rooms/demo-room/join', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ peerId: id })
+          });
+          const data = await res.json();
+          log(`Found ${data.activePeers.length} other active peer(s) in swarm.`);
+
+          // Connect to each peer currently in the room
+          data.activePeers.forEach(remotePeerId => {
+            log(`Dialing peer: ${remotePeerId}...`);
+            const conn = peer.connect(remotePeerId);
+            wireConnection(conn);
+          });
+
+          document.getElementById('btnSend').disabled = false;
+        } catch (err) {
+          log('Failed to join room: ' + err.message);
+        }
+      });
+
+      // Handle inbound connections from new peers joining later
+      peer.on('connection', (conn) => {
+        log(`Inbound connection from: ${conn.peer}`);
+        wireConnection(conn);
+        document.getElementById('btnSend').disabled = false;
+      });
+    };
+
+    function wireConnection(conn) {
+      conn.on('open', () => {
+        log(`P2P DataChannel OPEN with ${conn.peer}!`);
+        connections.push(conn);
+      });
+
+      conn.on('data', (data) => {
+        log(`<<< RECEIVED from ${conn.peer}: "${data}"`);
+      });
+
+      conn.on('close', () => {
+        log(`Peer ${conn.peer} disconnected.`);
+        connections = connections.filter(c => c !== conn);
+      });
+    }
+
+    document.getElementById('btnSend').onclick = () => {
+      const msg = `Payload chunk at ${Date.now()}`;
+      connections.forEach(conn => conn.send(msg));
+      log(`>>> SENT to ${connections.length} peer(s): "${msg}"`);
+    };
+  </script>
+</body>
+</html>
